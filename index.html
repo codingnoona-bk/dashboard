@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>선주 지적 관리 시스템 · 코알누</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Apple SD Gothic Neo','Malgun Gothic',Roboto,'Helvetica Neue',sans-serif;color:#1A1726;background:#F7F6FB;-webkit-font-smoothing:antialiased}
+  input,select,textarea,button{font-family:inherit}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#DCD8E8;border-radius:6px;border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background:#C5BFD8;background-clip:content-box}
+  @keyframes om-rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes om-sheet{from{transform:translateY(100%)}to{transform:translateY(0)}}
+  @keyframes om-fade{from{opacity:0}to{opacity:1}}
+  @keyframes om-toast{from{opacity:0;transform:translate(-50%,16px)}to{opacity:1;transform:translateX(-50%)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin .8s linear infinite}
+
+  /* hover / active / focus interactions (ported from design pseudo-styles) */
+  .btn-new:hover{background:#6B47E8 !important}
+  .delayed-chip:hover{border-color:#DC2626 !important}
+  .list-row:hover{background:#FAF9FD}
+  .btn-touch:active{transform:scale(.98)}
+  .foc:focus{border-color:#7C5CFC !important}
+  .btn-reject:hover{background:#FEF2F2 !important}
+  .btn-approve:hover{background:#138a3f !important}
+  .btn-back:hover{color:#7C5CFC !important}
+  #app{height:100%}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+import {
+  getFirestore, collection, doc, setDoc, updateDoc, onSnapshot, query, orderBy
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
+// ───────────────────────────── firebase ─────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyBKu88ixyGGy8x4ebS_aZ3aot-7-F1iq7c",
+  authDomain: "dashboard-61e0a.firebaseapp.com",
+  projectId: "dashboard-61e0a",
+  storageBucket: "dashboard-61e0a.firebasestorage.app",
+  messagingSenderId: "947807836894",
+  appId: "1:947807836894:web:c93f560f80fccf7cee404f"
+};
+const fbApp = initializeApp(firebaseConfig);
+const db = getFirestore(fbApp);
+const itemsCol = collection(db, 'items');
+
+  // ───────────────────────────── status meta ─────────────────────────────
+  var META = {
+    registered:{ label:'등록됨', fg:'#6B7280', bg:'#F3F4F6' },
+    confirmed:{ label:'확인됨', fg:'#2563EB', bg:'#EFF6FF' },
+    assigned:{ label:'배정됨', fg:'#6366F1', bg:'#EEF2FF' },
+    progress:{ label:'진행중', fg:'#7C5CFC', bg:'#F3F0FF' },
+    review:{ label:'검토대기', fg:'#D97706', bg:'#FFFBEB' },
+    done:{ label:'완료', fg:'#16A34A', bg:'#F0FDF4' },
+  };
+  var ORDER = ['registered','confirmed','assigned','progress','review','done'];
+
+  // ───────────────────────────── helpers ─────────────────────────────
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+  function prioStyle(p){
+    var c = p === '높음' ? '#DC2626' : (p === '보통' ? '#D97706' : '#6B7280');
+    var bg = p === '높음' ? '#FEECEC' : (p === '보통' ? '#FEF6E7' : '#F1F0F4');
+    return 'font-size:10.5px;font-weight:800;color:' + c + ';background:' + bg + ';padding:2px 7px;border-radius:6px;flex:none';
+  }
+  function initial(name){ return name ? name.slice(-2) : '?'; }
+  function today(){ return '2026.06.30 (화)'; }
+  function now(){ return '06.30 ' + new Date().toTimeString().slice(0,5); }
+
+  // ───────────────────────── firestore <-> view model ─────────────────────────
+  // Normalize a Firestore document into the shape the UI expects.
+  function normalize(id, data){
+    data = data || {};
+    return {
+      id: id,
+      code: data.code || id,
+      title: data.title || '',
+      ship: data.ship || '',
+      zone: data.zone || '',
+      source: data.source || '',
+      priority: data.priority || '보통',
+      status: data.status || 'registered',
+      assignee: data.assignee || '',
+      due: data.due || '미정',
+      created: data.created || '',
+      delayed: !!data.delayed,
+      photos: typeof data.photos === 'number' ? data.photos : 0,
+      workMemo: data.workMemo || '',
+      history: Array.isArray(data.history) ? data.history : [],
+      comments: Array.isArray(data.comments) ? data.comments : [],
+      seq: typeof data.seq === 'number' ? data.seq : 0,
+    };
+  }
+  // Next sequential punch-item code (P-26-NNN) based on what already exists.
+  function nextCode(){
+    var max = 0;
+    state.items.forEach(function (it) {
+      var m = /(\d+)\s*$/.exec(it.code || '');
+      if (m) { var n = parseInt(m[1], 10); if (n > max) max = n; }
+    });
+    return 'P-26-' + String(max + 1).padStart(3, '0');
+  }
+
+  // ───────────────────────────── state ─────────────────────────────
+  var state = {
+    screen: 'dashboard',
+    items: [],
+    loading: true,
+    loadError: '',
+    selectedId: null,
+    filters: { assignee:'전체', ship:'전체', zone:'전체', status:'전체' },
+    workerName: '김현수',
+    approveId: null,
+    report: { open:false, id:null, memo:'', photo:false },
+    reject: { open:false, id:null, reason:'', err:false },
+    reg: { content:'', ship:'', zone:'', date:'', source:'', priority:'보통', attach:false, touched:false },
+    assign: { worker:'', due:'' },
+    commentDraft: '',
+    toast: '',
+  };
+  var toastTimer = null;
+
+  // ───────────────────────────── mutators ─────────────────────────────
+  function go(s){ state.screen = s; render(); }
+  function showToast(m){
+    state.toast = m;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { state.toast = ''; render(); }, 2600);
+    render();
+  }
+
+  // Write a partial update to a Firestore item, appending one history entry.
+  // The onSnapshot listener reflects the change back into state.items.
+  function patch(id, p, hist){
+    var item = state.items.find(function (i) { return i.id === id; });
+    var history = ((item && item.history) || []).concat([hist]);
+    return updateDoc(doc(db, 'items', id), Object.assign({}, p, { history: history }));
+  }
+
+  async function submitReport(){
+    var r = state.report;
+    var item = state.items.find(function (i) { return i.id === r.id; });
+    if (!item) return;
+    var photos = (item.photos || 0) + (r.photo ? 1 : 0);
+    var note = '완료 보고' + (r.photo ? ' · 사진 1장 첨부' : '') + (r.memo ? ' · "' + r.memo + '"' : '');
+    state.report = Object.assign({}, state.report, { open:false });
+    render();
+    try {
+      await patch(r.id, { status:'review', photos:photos, workMemo: r.memo || item.workMemo }, { t:now(), who:state.workerName, act:note });
+      showToast('완료 보고 제출됨 — 승인 대기');
+    } catch (e) { showToast('저장 실패 — 다시 시도하세요'); }
+  }
+  async function approveItem(id){
+    if (!id) return;
+    state.approveId = null;
+    render();
+    try {
+      await patch(id, { status:'done' }, { t:now(), who:'서동현', act:'검토 후 승인 · 종결 처리' });
+      showToast('승인 완료 — 종결 처리됨');
+    } catch (e) { showToast('저장 실패 — 다시 시도하세요'); }
+  }
+  async function submitReject(){
+    var rj = state.reject;
+    if (!rj.reason.trim()) { state.reject = Object.assign({}, state.reject, { err:true }); render(); return; }
+    var id = rj.id, reason = rj.reason;
+    state.reject = Object.assign({}, state.reject, { open:false });
+    state.approveId = null;
+    render();
+    try {
+      await patch(id, { status:'progress' }, { t:now(), who:'서동현', act:'반려 · 사유: ' + reason, warn:true });
+      showToast('반려 처리됨 — 진행중으로 회귀');
+    } catch (e) { showToast('저장 실패 — 다시 시도하세요'); }
+  }
+  async function submitRegister(valid){
+    if (!valid) { state.reg = Object.assign({}, state.reg, { touched:true }); showToast('필수 항목을 입력하세요'); return; }
+    var r = state.reg;
+    var code = nextCode();
+    var dispDate = r.date ? r.date.slice(5).replace('-', '.') : '06.30';
+    var item = {
+      code: code, title: r.content.trim(), ship: r.ship, zone: r.zone.trim(),
+      source: r.source, priority: r.priority, status: 'registered', assignee: '',
+      due: '미정', created: dispDate, delayed: false, photos: r.attach ? 1 : 0, workMemo:'',
+      history: [{ t:dispDate + ' ' + new Date().toTimeString().slice(0,5), who:'강민재', act:'지적 등록 · 출처 ' + r.source }],
+      comments: [],
+      seq: Date.now(),
+    };
+    state.reg = { content:'', ship:'', zone:'', date:'', source:'', priority:'보통', attach:false, touched:false };
+    state.screen = 'dashboard';
+    render();
+    try {
+      await setDoc(doc(db, 'items', code), item);
+      showToast(code + ' 등록 완료');
+    } catch (e) { showToast('등록 실패 — 다시 시도하세요'); }
+  }
+  async function assignSubmit(valid){
+    if (!valid) { showToast('작업자와 기한을 선택하세요'); return; }
+    var a = state.assign;
+    var due = a.due ? a.due.slice(5).replace('-', '.') : '미정';
+    var id = state.selectedId, worker = a.worker;
+    state.assign = { worker:'', due:'' };
+    render();
+    try {
+      await patch(id, { status:'assigned', assignee:worker, due:due }, { t:now(), who:'강민재', act:worker + ' 배정 · 기한 ' + due });
+      showToast(worker + ' 작업자 배정됨');
+    } catch (e) { showToast('저장 실패 — 다시 시도하세요'); }
+  }
+  async function addComment(){
+    var text = state.commentDraft.trim();
+    if (!text) return;
+    var id = state.selectedId;
+    var item = state.items.find(function (i) { return i.id === id; });
+    if (!item) return;
+    var comments = (item.comments || []).concat([{ who:'강민재', t:'06.30', text:text }]);
+    state.commentDraft = '';
+    render();
+    try {
+      await updateDoc(doc(db, 'items', id), { comments: comments });
+    } catch (e) { showToast('저장 실패 — 다시 시도하세요'); }
+  }
+
+  // ───────────────────────────── view models ─────────────────────────────
+  function vmItem(it){
+    var m = META[it.status];
+    var delayed = it.delayed && it.status !== 'done';
+    return Object.assign({}, it, {
+      sLabel: m.label,
+      badgeStyle: 'display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:800;color:' + m.fg + ';background:' + m.bg + ';white-space:nowrap',
+      dotStyle: 'width:6px;height:6px;border-radius:9px;background:' + m.fg + ';flex:none',
+      prioStyle: prioStyle(it.priority),
+      delayed: delayed,
+      assigneeLabel: it.assignee || '미배정',
+      assigneeColor: it.assignee ? '#3A3648' : '#C5BFD8',
+      dueColor: delayed ? '#DC2626' : '#6E6A7C',
+    });
+  }
+  function cnt(k){ return state.items.filter(function (i) { return i.status === k; }).length; }
+  function delayedCount(){ return state.items.filter(function (i) { return i.delayed && i.status !== 'done'; }).length; }
+  function openCount(){ return state.items.length - cnt('done'); }
+
+  // ───────────────────────────── sidebar ─────────────────────────────
+  var ICONS = {
+    dashboard:'<rect x="3" y="3" width="7" height="9" rx="1.5"></rect><rect x="14" y="3" width="7" height="5" rx="1.5"></rect><rect x="14" y="12" width="7" height="9" rx="1.5"></rect><rect x="3" y="16" width="7" height="5" rx="1.5"></rect>',
+    worker:'<rect x="5" y="2" width="14" height="20" rx="2.5"></rect><line x1="10" y1="18" x2="14" y2="18"></line>',
+    approve:'<path d="M5 12.5l4.5 4.5L19 6.5"></path>',
+    register:'<line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>',
+  };
+  function navBtn(key, label, sub){
+    var active = state.screen === key || (key === 'dashboard' && state.screen === 'detail');
+    var style = 'display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:12px;cursor:pointer;font-size:14px;font-weight:700;border:none;width:100%;text-align:left;' + (active ? 'background:#F3F0FF;color:#7C5CFC' : 'background:transparent;color:#5A5668');
+    var iconStyle = 'color:' + (active ? '#7C5CFC' : '#A99FD6');
+    return '<button style="' + style + '" data-act="go" data-screen="' + key + '">' +
+      '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" style="' + iconStyle + '">' + ICONS[key] + '</svg>' +
+      '<span style="flex:1">' + label + '</span>' +
+      '<span style="font-size:10.5px;color:#B5B0C2;font-weight:600">' + sub + '</span>' +
+    '</button>';
+  }
+  function sidebar(){
+    return '' +
+    '<aside style="width:248px;flex:none;background:#fff;border-right:1px solid #ECEAF3;display:flex;flex-direction:column;padding:22px 16px">' +
+      '<div style="display:flex;align-items:center;gap:11px;padding:6px 8px 22px">' +
+        '<div style="width:38px;height:38px;border-radius:11px;background:#7C5CFC;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,Menlo,monospace;font-weight:800;font-size:15px;color:#fff;letter-spacing:-1px">{;}</div>' +
+        '<div>' +
+          '<div style="font-size:15.5px;font-weight:800;letter-spacing:-.3px">코알누</div>' +
+          '<div style="font-size:11.5px;color:#9A95A8;font-weight:600;margin-top:1px">선주 지적 관리</div>' +
+        '</div>' +
+      '</div>' +
+      '<nav style="display:flex;flex-direction:column;gap:4px">' +
+        navBtn('dashboard','현황 대시보드','담당자') +
+        navBtn('worker','내 업무','작업자·태블릿') +
+        navBtn('approve','승인','승인자') +
+        navBtn('register','지적 등록','담당자') +
+      '</nav>' +
+      '<div style="margin-top:auto;padding:14px;background:#F7F6FB;border-radius:14px">' +
+        '<div style="font-size:11px;color:#9A95A8;font-weight:700;margin-bottom:9px;letter-spacing:.2px">미완료 현황</div>' +
+        '<div style="display:flex;align-items:flex-end;gap:8px">' +
+          '<div style="font-size:30px;font-weight:800;line-height:.9;letter-spacing:-1px">' + openCount() + '</div>' +
+          '<div style="font-size:12.5px;color:#6E6A7C;font-weight:600;padding-bottom:3px">건 처리 중</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-top:10px">' +
+          '<span style="width:7px;height:7px;border-radius:9px;background:#DC2626"></span>' +
+          '<span style="font-size:12px;color:#DC2626;font-weight:700">지연 ' + delayedCount() + '건</span>' +
+        '</div>' +
+      '</div>' +
+    '</aside>';
+  }
+
+  // ───────────────────────────── dashboard ─────────────────────────────
+  var SELECT_STYLE = "appearance:none;background:#fff;border:1px solid #E2DEEE;border-radius:10px;padding:9px 32px 9px 13px;font-size:13px;font-weight:600;color:#3A3648;cursor:pointer;background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%2210%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%239A95A8%22 stroke-width=%223%22><polyline points=%226 9 12 15 18 9%22/></svg>');background-repeat:no-repeat;background-position:right 11px center";
+
+  function filterSelect(field, value, options){
+    var opts = options.map(function (o) {
+      return '<option value="' + esc(o) + '"' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>';
+    }).join('');
+    return '<select data-field="' + field + '" style="' + SELECT_STYLE + '">' + opts + '</select>';
+  }
+
+  function screenDashboard(){
+    var items = state.items;
+    var totalCount = items.length;
+    var doneCount = cnt('done');
+    var progressCount = cnt('progress');
+    var reviewCount = cnt('review');
+    var dCount = delayedCount();
+    var oCount = openCount();
+    var vmAll = items.map(vmItem);
+
+    var cardBase = 'background:#fff;border:1px solid #ECEAF3;border-radius:16px;padding:17px 18px';
+    function mkCard(label, value, sub, color, danger){
+      return '<div style="' + (danger ? cardBase + ';border-color:#F8C9C9;background:#FFFBFB' : cardBase) + '">' +
+        '<div style="font-size:13px;color:#6E6A7C;font-weight:700">' + label + '</div>' +
+        '<div style="display:flex;align-items:flex-end;gap:7px;margin-top:10px">' +
+          '<div style="font-size:30px;font-weight:800;line-height:.9;letter-spacing:-1px;color:' + color + '">' + value + '</div>' +
+          '<div style="font-size:12px;color:#9A95A8;font-weight:700;padding-bottom:4px">' + (sub || '') + '</div>' +
+        '</div>' +
+      '</div>';
+    }
+    var cards =
+      mkCard('전체 지적', totalCount, '미완료 ' + oCount, '#1A1726', false) +
+      mkCard('진행중', progressCount, '', '#7C5CFC', false) +
+      mkCard('검토대기', reviewCount, '', '#D97706', false) +
+      mkCard('완료', doneCount, '', '#16A34A', false) +
+      mkCard('지연', dCount, '', '#DC2626', true);
+
+    var dist = ORDER.map(function (k) {
+      var c = cnt(k); var m = META[k];
+      var pct = totalCount ? (c / totalCount * 100) : 0;
+      return { label:m.label, count:c, fg:m.fg, pct:pct };
+    });
+    var bars = dist.map(function (d) {
+      return '<div style="flex:0 0 ' + d.pct + '%;background:' + d.fg + '" title="' + d.label + '"></div>';
+    }).join('');
+    var legend = dist.map(function (d) {
+      return '<div style="display:flex;align-items:center;gap:7px">' +
+        '<span style="width:9px;height:9px;border-radius:9px;background:' + d.fg + ';flex:none"></span>' +
+        '<span style="font-size:12.5px;color:#5A5668;font-weight:600">' + d.label + '</span>' +
+        '<span style="font-size:12.5px;color:#1A1726;font-weight:800">' + d.count + '</span>' +
+      '</div>';
+    }).join('');
+
+    var delayedItems = vmAll.filter(function (v) { return v.delayed; });
+    var delayedStrip = '';
+    if (delayedItems.length > 0) {
+      var chips = delayedItems.map(function (it) {
+        return '<button data-act="open" data-id="' + esc(it.id) + '" class="delayed-chip" style="display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #F3B6B6;border-radius:11px;padding:9px 13px;cursor:pointer;text-align:left">' +
+          '<span style="font-family:ui-monospace,monospace;font-size:11px;color:#DC2626;font-weight:700">' + esc(it.code) + '</span>' +
+          '<span style="font-size:12.5px;font-weight:600;color:#1A1726;max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(it.title) + '</span>' +
+          '<span style="font-size:11.5px;color:#9A95A8;font-weight:600">' + esc(it.assigneeLabel) + '</span>' +
+        '</button>';
+      }).join('');
+      delayedStrip =
+      '<div style="background:#FEF2F2;border:1px solid #F8C9C9;border-radius:16px;padding:16px 20px;margin-bottom:18px">' +
+        '<div style="display:flex;align-items:center;gap:9px;margin-bottom:12px">' +
+          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#DC2626" stroke-width="2.2"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path></svg>' +
+          '<span style="font-size:14px;font-weight:800;color:#DC2626">지연 ' + dCount + '건 — 즉시 확인 필요</span>' +
+        '</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:9px">' + chips + '</div>' +
+      '</div>';
+    }
+
+    // filter options
+    function uniq(arr){ return ['전체'].concat(Array.from(new Set(arr))); }
+    var assigneeOptions = uniq(items.filter(function (i) { return i.assignee; }).map(function (i) { return i.assignee; }));
+    var shipOptions = uniq(items.map(function (i) { return i.ship; }));
+    var zoneOptions = uniq(items.map(function (i) { return i.zone; }));
+
+    // status chips
+    var chipDefs = [['전체','전체'],['registered','등록됨'],['confirmed','확인됨'],['assigned','배정됨'],['progress','진행중'],['review','검토대기'],['done','완료'],['지연','지연']];
+    var statusChips = chipDefs.map(function (def) {
+      var key = def[0], label = def[1];
+      var active = state.filters.status === key;
+      var fg = '#5A5668';
+      if (META[key]) fg = META[key].fg;
+      if (key === '지연') fg = '#DC2626';
+      var style = active
+        ? 'border:none;padding:7px 14px;border-radius:999px;font-size:12.5px;font-weight:800;cursor:pointer;background:' + (key === '전체' ? '#1A1726' : fg) + ';color:#fff'
+        : 'border:1px solid #E2DEEE;padding:7px 14px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;background:#fff;color:#5A5668';
+      return '<button data-act="statusFilter" data-status="' + key + '" style="' + style + '">' + label + '</button>';
+    }).join('');
+
+    // filtered list
+    var f = state.filters;
+    var dashList = vmAll.filter(function (v) {
+      return (f.assignee === '전체' || v.assignee === f.assignee) &&
+             (f.ship === '전체' || v.ship === f.ship) &&
+             (f.zone === '전체' || v.zone === f.zone) &&
+             (f.status === '전체' || (f.status === '지연' ? v.delayed : v.status === f.status));
+    });
+    var rows = dashList.map(function (it) {
+      return '<div data-act="open" data-id="' + esc(it.id) + '" class="list-row" style="display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid #F4F2F9;cursor:pointer">' +
+        '<div style="width:78px;font-family:ui-monospace,monospace;font-size:11.5px;color:#9A95A8;font-weight:600">' + esc(it.code) + '</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<span style="' + it.prioStyle + '">' + esc(it.priority) + '</span>' +
+            '<span style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(it.title) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div style="width:150px;min-width:0">' +
+          '<div style="font-size:13px;font-weight:700;color:#3A3648">' + esc(it.ship) + '</div>' +
+          '<div style="font-size:11.5px;color:#9A95A8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(it.zone) + '</div>' +
+        '</div>' +
+        '<div style="width:96px;font-size:13px;font-weight:600;color:' + it.assigneeColor + '">' + esc(it.assigneeLabel) + '</div>' +
+        '<div style="width:74px;font-size:12.5px;font-weight:600;color:' + it.dueColor + '">' + esc(it.due) + '</div>' +
+        '<div style="width:118px;display:flex;align-items:center;gap:6px">' +
+          '<span style="' + it.badgeStyle + '"><span style="' + it.dotStyle + '"></span>' + it.sLabel + '</span>' +
+          (it.delayed ? '<span style="font-size:10px;font-weight:800;color:#DC2626;background:#FEECEC;padding:2px 6px;border-radius:6px">지연</span>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+    var listBody = dashList.length === 0
+      ? '<div style="padding:46px;text-align:center;color:#B5B0C2;font-size:13.5px;font-weight:600">조건에 맞는 지적이 없습니다.</div>'
+      : rows;
+
+    return '' +
+    '<div data-screen-label="대시보드" style="height:100%;overflow-y:auto;padding:30px 36px 60px">' +
+      '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:24px">' +
+        '<div>' +
+          '<div style="font-size:13px;color:#9A95A8;font-weight:700;letter-spacing:.2px;margin-bottom:5px">현황 대시보드 · ' + today() + '</div>' +
+          '<h1 style="margin:0;font-size:27px;font-weight:800;letter-spacing:-.6px">선주 지적 전체 현황</h1>' +
+        '</div>' +
+        '<button data-act="go" data-screen="register" class="btn-new" style="flex:none;display:flex;align-items:center;gap:8px;background:#7C5CFC;color:#fff;border:none;font-size:14.5px;font-weight:700;padding:13px 22px;border-radius:999px;cursor:pointer;box-shadow:0 6px 16px rgba(124,92,252,.32)">' +
+          '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>새 지적 등록' +
+        '</button>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:18px">' + cards + '</div>' +
+      '<div style="background:#fff;border:1px solid #ECEAF3;border-radius:16px;padding:18px 20px;margin-bottom:18px">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
+          '<div style="font-size:13.5px;font-weight:800">상태 분포</div>' +
+          '<div style="font-size:12px;color:#9A95A8;font-weight:600">총 ' + totalCount + '건</div>' +
+        '</div>' +
+        '<div style="display:flex;height:13px;border-radius:8px;overflow:hidden;background:#F2F0F8">' + bars + '</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:18px;margin-top:14px">' + legend + '</div>' +
+      '</div>' +
+      delayedStrip +
+      '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">' +
+        '<div style="display:flex;align-items:center;gap:8px">' +
+          filterSelect('filterAssignee', f.assignee, assigneeOptions) +
+          filterSelect('filterShip', f.ship, shipOptions) +
+          filterSelect('filterZone', f.zone, zoneOptions) +
+        '</div>' +
+        '<div style="width:1px;height:24px;background:#E2DEEE"></div>' +
+        '<div style="display:flex;gap:7px;flex-wrap:wrap">' + statusChips + '</div>' +
+      '</div>' +
+      '<div style="background:#fff;border:1px solid #ECEAF3;border-radius:16px;overflow:hidden">' +
+        '<div style="display:flex;align-items:center;gap:14px;padding:13px 20px;border-bottom:1px solid #F0EEF6;font-size:11.5px;font-weight:700;color:#9A95A8;letter-spacing:.3px">' +
+          '<div style="width:78px">번호</div>' +
+          '<div style="flex:1;min-width:0">지적 내용</div>' +
+          '<div style="width:150px">호선 · 구역</div>' +
+          '<div style="width:96px">담당</div>' +
+          '<div style="width:74px">기한</div>' +
+          '<div style="width:118px">상태</div>' +
+        '</div>' +
+        listBody +
+      '</div>' +
+    '</div>';
+  }
+
+  // ───────────────────────────── worker (tablet) ─────────────────────────────
+  function screenWorker(){
+    var items = state.items;
+    var name = state.workerName;
+    var vmAll = items.map(vmItem);
+    var wItems = vmAll.filter(function (v) { return v.assignee === name && v.status !== 'done'; });
+    function wCnt(k){ return items.filter(function (i) { return i.assignee === name && i.status === k; }).length; }
+
+    var cards = wItems.map(function (v) {
+      var cardStyle = 'background:#fff;border:1.5px solid ' + (v.delayed ? '#F3B6B6' : '#ECEAF3') + ';border-radius:20px;padding:22px 24px;box-shadow:0 2px 10px rgba(20,16,40,.04)';
+      var action = '';
+      if (v.status === 'assigned') {
+        action = '<button data-act="start" data-id="' + esc(v.id) + '" class="btn-touch" style="width:100%;min-height:64px;background:#7C5CFC;color:#fff;border:none;border-radius:18px;font-size:18px;font-weight:800;cursor:pointer;box-shadow:0 8px 20px rgba(124,92,252,.3)">작업 착수하기</button>';
+      } else if (v.status === 'progress') {
+        action = '<button data-act="report" data-id="' + esc(v.id) + '" class="btn-touch" style="width:100%;min-height:64px;background:#16A34A;color:#fff;border:none;border-radius:18px;font-size:18px;font-weight:800;cursor:pointer;box-shadow:0 8px 20px rgba(22,163,74,.28);display:flex;align-items:center;justify-content:center;gap:10px">' +
+          '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M5 12.5l4.5 4.5L19 6.5"></path></svg>완료 보고하기</button>';
+      } else if (v.status === 'review') {
+        action = '<div style="width:100%;min-height:58px;background:#FFFBEB;color:#B45309;border:1.5px dashed #F2C677;border-radius:18px;font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:9px">승인자 검토 대기중</div>';
+      }
+      return '<div style="' + cardStyle + '">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">' +
+          '<span style="' + v.badgeStyle + '"><span style="' + v.dotStyle + '"></span>' + v.sLabel + '</span>' +
+          '<span style="font-family:ui-monospace,monospace;font-size:12px;color:#9A95A8;font-weight:600">' + esc(v.code) + '</span>' +
+        '</div>' +
+        '<div style="font-size:19px;font-weight:700;line-height:1.4;margin:13px 0 10px">' + esc(v.title) + '</div>' +
+        '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:13.5px;color:#6E6A7C;font-weight:600">' +
+          '<span>' + esc(v.ship) + ' · ' + esc(v.zone) + '</span>' +
+          '<span style="color:' + v.dueColor + '">기한 ' + esc(v.due) + '</span>' +
+        '</div>' +
+        '<div style="margin-top:18px">' + action + '</div>' +
+      '</div>';
+    }).join('');
+    var listBody = wItems.length === 0
+      ? '<div style="padding:60px 20px;text-align:center;color:#B5B0C2;font-size:15px;font-weight:600">배정된 지적이 없습니다. 잠시 휴식하세요 ☕</div>'
+      : cards;
+
+    // report sheet
+    var sheet = '';
+    if (state.report.open) {
+      var reportItem = state.items.find(function (i) { return i.id === state.report.id; });
+      var reportTitle = reportItem ? reportItem.title : '';
+      var photo = state.report.photo;
+      var photoBtnStyle = 'width:100%;min-height:96px;border:1.5px dashed ' + (photo ? '#9FE3BC' : '#CFC7E8') + ';background:' + (photo ? '#F2FCF6' : '#FBFAFD') + ';border-radius:16px;cursor:pointer;display:flex;align-items:center;justify-content:center';
+      var photoInner = photo
+        ? '<div style="display:flex;align-items:center;gap:12px"><div style="width:54px;height:54px;border-radius:12px;background:repeating-linear-gradient(45deg,#EDEAF7,#EDEAF7 7px,#F6F4FB 7px,#F6F4FB 14px);display:flex;align-items:center;justify-content:center;font-family:ui-monospace,monospace;font-size:9px;color:#9A95A8">IMG</div><div style="text-align:left"><div style="font-size:14px;font-weight:700;color:#16A34A">사진 1장 첨부됨</div><div style="font-size:12px;color:#9A95A8;font-weight:600">작업완료_보수도장.jpg</div></div></div>'
+        : '<div style="display:flex;flex-direction:column;align-items:center;gap:8px"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#A99FD6" stroke-width="2"><rect x="3" y="6" width="18" height="14" rx="2.5"></rect><circle cx="12" cy="13" r="3.2"></circle><path d="M8 6l1.5-2.5h5L16 6"></path></svg><span style="font-size:14px;font-weight:700;color:#7C5CFC">탭하여 사진 촬영·첨부</span></div>';
+      sheet =
+      '<div style="position:absolute;inset:0;background:rgba(20,16,40,.5);display:flex;align-items:flex-end;justify-content:center;animation:om-fade .2s ease" data-act="closeSheet">' +
+        '<div data-act="stop" style="width:560px;max-width:94%;background:#fff;border-radius:26px 26px 0 0;padding:26px 28px 30px;animation:om-sheet .28s cubic-bezier(.2,.8,.2,1);margin-bottom:0">' +
+          '<div style="width:40px;height:5px;background:#E2DEEE;border-radius:9px;margin:0 auto 18px"></div>' +
+          '<div style="font-size:21px;font-weight:800;margin-bottom:5px">완료 보고</div>' +
+          '<div style="font-size:13.5px;color:#6E6A7C;font-weight:600;margin-bottom:20px">' + esc(reportTitle) + '</div>' +
+          '<div style="font-size:13px;font-weight:700;color:#3A3648;margin-bottom:9px">작업 사진</div>' +
+          '<button data-act="togglePhoto" style="' + photoBtnStyle + '">' + photoInner + '</button>' +
+          '<div style="font-size:13px;font-weight:700;color:#3A3648;margin:18px 0 9px">작업 메모</div>' +
+          '<textarea data-field="reportMemo" placeholder="수행한 작업 내용을 입력하세요 (선택)" class="foc" style="width:100%;min-height:84px;resize:vertical;border:1.5px solid #E2DEEE;border-radius:14px;padding:13px 15px;font-size:15px;color:#1A1726;outline:none">' + esc(state.report.memo) + '</textarea>' +
+          '<div style="display:flex;gap:12px;margin-top:22px">' +
+            '<button data-act="closeSheet" style="flex:none;min-height:58px;padding:0 26px;background:#F2F0F8;color:#5A5668;border:none;border-radius:16px;font-size:16px;font-weight:700;cursor:pointer">취소</button>' +
+            '<button data-act="submitReport" style="flex:1;min-height:58px;background:#16A34A;color:#fff;border:none;border-radius:16px;font-size:17px;font-weight:800;cursor:pointer">완료 보고 제출</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    return '' +
+    '<div data-screen-label="내업무-작업자" style="height:100%;overflow-y:auto;background:#E9E7F0;display:flex;align-items:flex-start;justify-content:center;padding:26px">' +
+      '<div style="width:880px;max-width:100%;background:#15131C;border-radius:34px;padding:14px;box-shadow:0 30px 70px rgba(20,16,40,.32)">' +
+        '<div style="display:flex;justify-content:center;margin-bottom:8px"><span style="width:7px;height:7px;border-radius:9px;background:#3A3548"></span></div>' +
+        '<div style="background:#fff;border-radius:24px;overflow:hidden;height:760px;display:flex;flex-direction:column">' +
+          '<div style="padding:24px 28px 18px;border-bottom:1px solid #F0EEF6;display:flex;align-items:center;justify-content:space-between">' +
+            '<div>' +
+              '<div style="font-size:13px;color:#9A95A8;font-weight:700">내 업무 · 태블릿</div>' +
+              '<div style="display:flex;align-items:center;gap:10px;margin-top:4px">' +
+                '<h1 style="margin:0;font-size:25px;font-weight:800;letter-spacing:-.5px">' + esc(name) + ' 작업자</h1>' +
+              '</div>' +
+            '</div>' +
+            '<div style="display:flex;gap:10px">' +
+              '<div style="text-align:center;background:#EEF2FF;border-radius:14px;padding:10px 16px"><div style="font-size:23px;font-weight:800;color:#6366F1;line-height:1">' + wCnt('assigned') + '</div><div style="font-size:11px;color:#6366F1;font-weight:700;margin-top:3px">배정됨</div></div>' +
+              '<div style="text-align:center;background:#F3F0FF;border-radius:14px;padding:10px 16px"><div style="font-size:23px;font-weight:800;color:#7C5CFC;line-height:1">' + wCnt('progress') + '</div><div style="font-size:11px;color:#7C5CFC;font-weight:700;margin-top:3px">진행중</div></div>' +
+              '<div style="text-align:center;background:#FFFBEB;border-radius:14px;padding:10px 16px"><div style="font-size:23px;font-weight:800;color:#D97706;line-height:1">' + wCnt('review') + '</div><div style="font-size:11px;color:#D97706;font-weight:700;margin-top:3px">검토대기</div></div>' +
+            '</div>' +
+          '</div>' +
+          '<div style="flex:1;overflow-y:auto;padding:20px 28px 28px;display:flex;flex-direction:column;gap:16px">' + listBody + '</div>' +
+        '</div>' +
+      '</div>' +
+      sheet +
+    '</div>';
+  }
+
+  // ───────────────────────────── approve ─────────────────────────────
+  function screenApprove(){
+    var items = state.items;
+    var vmAll = items.map(vmItem);
+    var reviewItems = vmAll.filter(function (v) { return v.status === 'review'; });
+    var approveId = state.approveId;
+    if (!approveId || !reviewItems.find(function (v) { return v.id === approveId; })) {
+      approveId = reviewItems[0] ? reviewItems[0].id : null;
+    }
+    // Persist the resolved selection (incl. the default-to-first fallback) so the
+    // 승인 / 반려 buttons act on the item that is actually shown as selected.
+    state.approveId = approveId;
+
+    var listRows = reviewItems.map(function (v) {
+      var rowStyle = 'padding:16px 20px;border-bottom:1px solid #F0EEF6;cursor:pointer;' + (v.id === approveId ? 'background:#fff;box-shadow:inset 3px 0 0 #7C5CFC' : 'background:transparent');
+      return '<div data-act="selectApprove" data-id="' + esc(v.id) + '" style="' + rowStyle + '">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px">' +
+          '<span style="font-family:ui-monospace,monospace;font-size:11.5px;color:#9A95A8;font-weight:600">' + esc(v.code) + '</span>' +
+          '<span style="' + prioStyle(v.priority) + '">' + esc(v.priority) + '</span>' +
+        '</div>' +
+        '<div style="font-size:14.5px;font-weight:700;line-height:1.4;margin-bottom:8px">' + esc(v.title) + '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px;font-size:12px;color:#9A95A8;font-weight:600"><span>' + esc(v.ship) + ' · ' + esc(v.zone) + '</span><span>·</span><span>' + esc(v.assigneeLabel) + '</span></div>' +
+      '</div>';
+    }).join('');
+    var listBody = reviewItems.length === 0
+      ? '<div style="padding:48px 24px;text-align:center;color:#B5B0C2;font-size:13.5px;font-weight:600">검토 대기중인 지적이 없습니다.</div>'
+      : listRows;
+
+    var selRaw = approveId ? items.find(function (i) { return i.id === approveId; }) : null;
+    var detail;
+    if (selRaw) {
+      var v = vmItem(selRaw);
+      var photoCount = Math.max(selRaw.photos, 1);
+      var photos = '';
+      for (var i = 0; i < photoCount; i++) {
+        photos += '<div style="width:200px;height:148px;border-radius:14px;background:repeating-linear-gradient(45deg,#EDEAF7,#EDEAF7 9px,#F6F4FB 9px,#F6F4FB 18px);border:1px solid #E6E2F0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#A99FD6" stroke-width="1.8"><rect x="3" y="6" width="18" height="14" rx="2.5"></rect><circle cx="12" cy="13" r="3.2"></circle></svg><span style="font-family:ui-monospace,monospace;font-size:10.5px;color:#9A95A8">작업사진 ' + (i + 1) + '</span></div>';
+      }
+      var workMemo = selRaw.workMemo || '작업자 메모가 없습니다.';
+      detail =
+      '<div style="max-width:760px">' +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+          '<span style="font-family:ui-monospace,monospace;font-size:12.5px;color:#7C5CFC;font-weight:700;background:#F3F0FF;padding:4px 10px;border-radius:8px">' + esc(v.code) + '</span>' +
+          '<span style="' + prioStyle(v.priority) + '">' + esc(v.priority) + '</span>' +
+        '</div>' +
+        '<h2 style="margin:0 0 16px;font-size:23px;font-weight:800;line-height:1.35;letter-spacing:-.4px">' + esc(v.title) + '</h2>' +
+        '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#ECEAF3;border:1px solid #ECEAF3;border-radius:14px;overflow:hidden;margin-bottom:24px">' +
+          '<div style="background:#fff;padding:13px 16px"><div style="font-size:11.5px;color:#9A95A8;font-weight:700;margin-bottom:4px">호선</div><div style="font-size:14px;font-weight:700">' + esc(v.ship) + '</div></div>' +
+          '<div style="background:#fff;padding:13px 16px"><div style="font-size:11.5px;color:#9A95A8;font-weight:700;margin-bottom:4px">구역</div><div style="font-size:14px;font-weight:700">' + esc(v.zone) + '</div></div>' +
+          '<div style="background:#fff;padding:13px 16px"><div style="font-size:11.5px;color:#9A95A8;font-weight:700;margin-bottom:4px">작업자</div><div style="font-size:14px;font-weight:700">' + esc(v.assigneeLabel) + '</div></div>' +
+          '<div style="background:#fff;padding:13px 16px"><div style="font-size:11.5px;color:#9A95A8;font-weight:700;margin-bottom:4px">기한</div><div style="font-size:14px;font-weight:700">' + esc(v.due) + '</div></div>' +
+        '</div>' +
+        '<div style="font-size:14px;font-weight:800;margin-bottom:12px">작업 결과 사진</div>' +
+        '<div style="display:flex;gap:12px;margin-bottom:24px">' + photos + '</div>' +
+        '<div style="font-size:14px;font-weight:800;margin-bottom:10px">작업자 메모</div>' +
+        '<div style="background:#FBFAFD;border:1px solid #ECEAF3;border-radius:14px;padding:16px 18px;font-size:14.5px;line-height:1.6;color:#3A3648;margin-bottom:30px">' + esc(workMemo) + '</div>' +
+        '<div style="display:flex;gap:14px;position:sticky;bottom:0;padding:18px 0 0;background:linear-gradient(transparent,#F7F6FB 30%)">' +
+          '<button data-act="openReject" class="btn-reject" style="flex:none;display:flex;align-items:center;gap:8px;padding:15px 28px;background:#fff;color:#DC2626;border:1.5px solid #F3B6B6;border-radius:999px;font-size:15.5px;font-weight:800;cursor:pointer">' +
+            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M9 14l6-6M9 8l6 6"></path><circle cx="12" cy="12" r="9"></circle></svg>반려</button>' +
+          '<button data-act="approve" class="btn-approve" style="flex:1;display:flex;align-items:center;justify-content:center;gap:9px;padding:15px;background:#16A34A;color:#fff;border:none;border-radius:999px;font-size:16px;font-weight:800;cursor:pointer;box-shadow:0 8px 20px rgba(22,163,74,.28)">' +
+            '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M5 12.5l4.5 4.5L19 6.5"></path></svg>승인 · 종결 처리</button>' +
+        '</div>' +
+      '</div>';
+    } else {
+      detail =
+      '<div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:#C5BFD8">' +
+        '<svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 12.5l4.5 4.5L19 6.5"></path></svg>' +
+        '<div style="font-size:15px;font-weight:700;color:#9A95A8">모든 검토를 완료했습니다</div>' +
+      '</div>';
+    }
+
+    // reject modal
+    var modal = '';
+    if (state.reject.open) {
+      var rejectTextStyle = 'width:100%;min-height:96px;resize:vertical;border:1.5px solid ' + (state.reject.err ? '#F3B6B6' : '#E2DEEE') + ';border-radius:13px;padding:13px 15px;font-size:14.5px;outline:none';
+      modal =
+      '<div style="position:absolute;inset:0;background:rgba(20,16,40,.5);display:flex;align-items:center;justify-content:center;animation:om-fade .2s ease" data-act="closeReject">' +
+        '<div data-act="stop" style="width:520px;max-width:92%;background:#fff;border-radius:22px;padding:28px;animation:om-rise .25s ease">' +
+          '<div style="display:flex;align-items:center;gap:11px;margin-bottom:8px">' +
+            '<div style="width:40px;height:40px;border-radius:11px;background:#FEF2F2;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#DC2626" stroke-width="2.3"><path d="M9 14l6-6M9 8l6 6"></path><circle cx="12" cy="12" r="9"></circle></svg></div>' +
+            '<div><div style="font-size:19px;font-weight:800">반려 처리</div><div style="font-size:13px;color:#9A95A8;font-weight:600">진행중 상태로 되돌아갑니다</div></div>' +
+          '</div>' +
+          '<div style="font-size:13px;font-weight:700;color:#3A3648;margin:18px 0 8px">반려 사유 <span style="color:#DC2626">*</span></div>' +
+          '<textarea data-field="rejectReason" class="foc" placeholder="반려 사유를 구체적으로 입력하세요 (작업자에게 전달됩니다)" style="' + rejectTextStyle + '">' + esc(state.reject.reason) + '</textarea>' +
+          (state.reject.err ? '<div style="font-size:12.5px;color:#DC2626;font-weight:700;margin-top:7px">반려 사유는 필수 입력 항목입니다.</div>' : '') +
+          '<div style="display:flex;gap:11px;margin-top:22px">' +
+            '<button data-act="closeReject" style="flex:none;padding:13px 24px;background:#F2F0F8;color:#5A5668;border:none;border-radius:13px;font-size:14.5px;font-weight:700;cursor:pointer">취소</button>' +
+            '<button data-act="submitReject" style="flex:1;padding:13px;background:#DC2626;color:#fff;border:none;border-radius:13px;font-size:15px;font-weight:800;cursor:pointer">반려하기</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    return '' +
+    '<div data-screen-label="승인-승인자" style="height:100%;display:flex;flex-direction:column">' +
+      '<div style="padding:24px 32px 18px;border-bottom:1px solid #ECEAF3;background:#fff;display:flex;align-items:center;justify-content:space-between">' +
+        '<div>' +
+          '<div style="font-size:13px;color:#9A95A8;font-weight:700">승인 검토 · 승인자 서동현</div>' +
+          '<h1 style="margin:5px 0 0;font-size:24px;font-weight:800;letter-spacing:-.5px">검토대기 ' + reviewItems.length + '건</h1>' +
+        '</div>' +
+      '</div>' +
+      '<div style="flex:1;display:flex;min-height:0">' +
+        '<div style="width:392px;flex:none;border-right:1px solid #ECEAF3;overflow-y:auto;background:#FBFAFD">' + listBody + '</div>' +
+        '<div style="flex:1;min-width:0;overflow-y:auto;padding:30px 36px 60px">' + detail + '</div>' +
+      '</div>' +
+      modal +
+    '</div>';
+  }
+
+  // ───────────────────────────── register ─────────────────────────────
+  function screenRegister(){
+    var reg = state.reg;
+    var regValid = reg.content.trim() && reg.ship && reg.zone.trim() && reg.date && reg.source;
+    var regErr = {
+      content: reg.touched && !reg.content.trim(),
+      ship: reg.touched && !reg.ship,
+      zone: reg.touched && !reg.zone.trim(),
+      date: reg.touched && !reg.date,
+      source: reg.touched && !reg.source,
+    };
+    function inputBase(bad){ return 'width:100%;border:1.5px solid ' + (bad ? '#F3B6B6' : '#E2DEEE') + ';border-radius:12px;padding:12px 15px;font-size:14.5px;color:#1A1726;outline:none;background:#FBFAFD'; }
+
+    var shipChoices = ['H2847','H2851','H2863','S1490'];
+    var shipOpts = '<option value="">선택하세요</option>' + shipChoices.map(function (s) {
+      return '<option value="' + esc(s) + '"' + (reg.ship === s ? ' selected' : '') + '>' + esc(s) + '</option>';
+    }).join('');
+
+    var sourceChoices = ['엑셀','카톡','이메일','현장'].map(function (s) {
+      var style = reg.source === s
+        ? 'flex:1;padding:11px;border:1.5px solid #7C5CFC;background:#F3F0FF;color:#7C5CFC;border-radius:11px;font-size:13.5px;font-weight:800;cursor:pointer'
+        : 'flex:1;padding:11px;border:1.5px solid #E2DEEE;background:#fff;color:#5A5668;border-radius:11px;font-size:13.5px;font-weight:600;cursor:pointer';
+      return '<button data-act="regSource" data-source="' + esc(s) + '" style="' + style + '">' + esc(s) + '</button>';
+    }).join('');
+
+    var priorityChoices = ['높음','보통','낮음'].map(function (p) {
+      var c = p === '높음' ? '#DC2626' : (p === '보통' ? '#D97706' : '#6B7280');
+      var sel = reg.priority === p;
+      var style = sel
+        ? 'flex:1;padding:11px;border:1.5px solid ' + c + ';background:' + c + '14;color:' + c + ';border-radius:11px;font-size:13.5px;font-weight:800;cursor:pointer'
+        : 'flex:1;padding:11px;border:1.5px solid #E2DEEE;background:#fff;color:#5A5668;border-radius:11px;font-size:13.5px;font-weight:600;cursor:pointer';
+      return '<button data-act="regPrio" data-prio="' + esc(p) + '" style="' + style + '">' + esc(p) + '</button>';
+    }).join('');
+
+    var attachStyle = 'width:100%;text-align:left;padding:14px 16px;border:1.5px dashed ' + (reg.attach ? '#C0B6EC' : '#E2DEEE') + ';background:' + (reg.attach ? '#FAF9FE' : '#FBFAFD') + ';border-radius:13px;cursor:pointer';
+    var attachInner = reg.attach
+      ? '<div style="display:flex;align-items:center;gap:10px"><div style="width:32px;height:32px;border-radius:8px;background:#F3F0FF;display:flex;align-items:center;justify-content:center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#7C5CFC" stroke-width="2"><path d="M14 2v6h6"></path><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path></svg></div><span style="font-size:13.5px;font-weight:700;color:#3A3648">선주지적_원본.xlsx · 24KB</span></div>'
+      : '<span style="font-size:13.5px;color:#9A95A8;font-weight:600">클릭하여 엑셀·이미지·문서 첨부 (선택)</span>';
+
+    var submitStyle = 'padding:14px 30px;border:none;border-radius:999px;font-size:15.5px;font-weight:800;cursor:pointer;' + (regValid ? 'background:#7C5CFC;color:#fff;box-shadow:0 6px 16px rgba(124,92,252,.3)' : 'background:#E5E1F0;color:#A99FD6');
+
+    function errMsg(show, msg){ return show ? '<div style="font-size:12px;color:#DC2626;font-weight:700;margin-top:6px">' + msg + '</div>' : ''; }
+
+    return '' +
+    '<div data-screen-label="지적등록" style="height:100%;overflow-y:auto;padding:30px 36px 60px">' +
+      '<div style="max-width:720px;margin:0 auto">' +
+        '<div style="font-size:13px;color:#9A95A8;font-weight:700;margin-bottom:5px">지적 등록 · 담당자</div>' +
+        '<h1 style="margin:0 0 26px;font-size:26px;font-weight:800;letter-spacing:-.5px">새 선주 지적 등록</h1>' +
+        '<div style="background:#fff;border:1px solid #ECEAF3;border-radius:18px;padding:28px">' +
+          '<div style="margin-bottom:22px">' +
+            '<label style="display:block;font-size:13.5px;font-weight:700;margin-bottom:9px">지적 내용 <span style="color:#DC2626">*</span></label>' +
+            '<textarea data-field="regContent" class="foc" placeholder="예) 기관실 #2 발전기 냉각수 배관 용접부 도장 박리" style="width:100%;min-height:88px;resize:vertical;' + inputBase(regErr.content) + '">' + esc(reg.content) + '</textarea>' +
+            errMsg(regErr.content, '지적 내용을 입력하세요.') +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:22px">' +
+            '<div>' +
+              '<label style="display:block;font-size:13.5px;font-weight:700;margin-bottom:9px">호선 <span style="color:#DC2626">*</span></label>' +
+              '<select data-field="regShip" style="appearance:none;cursor:pointer;' + inputBase(regErr.ship) + '">' + shipOpts + '</select>' +
+              errMsg(regErr.ship, '호선을 선택하세요.') +
+            '</div>' +
+            '<div>' +
+              '<label style="display:block;font-size:13.5px;font-weight:700;margin-bottom:9px">구역 <span style="color:#DC2626">*</span></label>' +
+              '<input data-field="regZone" value="' + esc(reg.zone) + '" placeholder="예) 기관실, 거주구 A데크" style="' + inputBase(regErr.zone) + '" />' +
+              errMsg(regErr.zone, '구역을 입력하세요.') +
+            '</div>' +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:22px">' +
+            '<div>' +
+              '<label style="display:block;font-size:13.5px;font-weight:700;margin-bottom:9px">발생일 <span style="color:#DC2626">*</span></label>' +
+              '<input type="date" data-field="regDate" value="' + esc(reg.date) + '" style="' + inputBase(regErr.date) + '" />' +
+              errMsg(regErr.date, '발생일을 선택하세요.') +
+            '</div>' +
+            '<div>' +
+              '<label style="display:block;font-size:13.5px;font-weight:700;margin-bottom:9px">출처 <span style="color:#DC2626">*</span></label>' +
+              '<div style="display:flex;gap:8px">' + sourceChoices + '</div>' +
+              errMsg(regErr.source, '출처를 선택하세요.') +
+            '</div>' +
+          '</div>' +
+          '<div style="margin-bottom:22px">' +
+            '<label style="display:block;font-size:13.5px;font-weight:700;margin-bottom:9px">우선순위</label>' +
+            '<div style="display:flex;gap:8px">' + priorityChoices + '</div>' +
+          '</div>' +
+          '<div style="margin-bottom:8px">' +
+            '<label style="display:block;font-size:13.5px;font-weight:700;margin-bottom:9px">첨부 파일</label>' +
+            '<button data-act="toggleAttach" style="' + attachStyle + '">' + attachInner + '</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:14px;margin-top:22px">' +
+          '<button data-act="submitRegister" style="' + submitStyle + '">지적 등록하기</button>' +
+          (!regValid ? '<span style="font-size:13px;color:#9A95A8;font-weight:600">필수 항목(*)을 모두 입력하면 등록할 수 있습니다.</span>' : '') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  // ───────────────────────────── detail ─────────────────────────────
+  function screenDetail(){
+    var selRaw = state.items.find(function (i) { return i.id === state.selectedId; }) || null;
+    var inner = '';
+    if (selRaw) {
+      var v = vmItem(selRaw);
+      var photoList = '';
+      for (var i = 0; i < selRaw.photos; i++) {
+        photoList += '<div style="width:180px;height:128px;border-radius:13px;background:repeating-linear-gradient(45deg,#EDEAF7,#EDEAF7 9px,#F6F4FB 9px,#F6F4FB 18px);border:1px solid #E6E2F0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#A99FD6" stroke-width="1.8"><rect x="3" y="6" width="18" height="14" rx="2.5"></rect><circle cx="12" cy="13" r="3.2"></circle></svg><span style="font-family:ui-monospace,monospace;font-size:10px;color:#9A95A8">사진 ' + (i + 1) + '</span></div>';
+      }
+      if (selRaw.photos === 0) photoList += '<div style="font-size:13px;color:#B5B0C2;font-weight:600;padding:8px 0">첨부된 자료가 없습니다.</div>';
+
+      var comments = selRaw.comments.map(function (c) {
+        return '<div style="display:flex;gap:11px">' +
+          '<div style="width:34px;height:34px;flex:none;border-radius:10px;background:#F3F0FF;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#7C5CFC">' + esc(initial(c.who)) + '</div>' +
+          '<div style="flex:1;background:#FBFAFD;border:1px solid #ECEAF3;border-radius:12px;padding:11px 14px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:3px"><span style="font-size:13px;font-weight:700">' + esc(c.who) + '</span><span style="font-size:11.5px;color:#B5B0C2;font-weight:600">' + esc(c.t) + '</span></div><div style="font-size:13.5px;color:#3A3648;line-height:1.5">' + esc(c.text) + '</div></div>' +
+        '</div>';
+      }).join('');
+      if (selRaw.comments.length === 0) comments = '<div style="font-size:13px;color:#B5B0C2;font-weight:600">아직 코멘트가 없습니다.</div>';
+
+      // action card by status
+      var action = '';
+      if (selRaw.status === 'registered') {
+        action = '<div style="font-size:13px;color:#6E6A7C;font-weight:600;line-height:1.5;margin-bottom:14px">내용을 검토하고 확인 처리하세요.</div>' +
+          '<button data-act="confirm" style="width:100%;padding:13px;background:#2563EB;color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer">확인 처리</button>';
+      } else if (selRaw.status === 'confirmed') {
+        var assignValid = state.assign.worker && state.assign.due;
+        var workerChoices = ['김현수','박정환','이상민','최영호','정태욱','한지웅','오세진','윤대호'];
+        var workerOpts = '<option value="">작업자 선택</option>' + workerChoices.map(function (w) {
+          return '<option value="' + esc(w) + '"' + (state.assign.worker === w ? ' selected' : '') + '>' + esc(w) + '</option>';
+        }).join('');
+        var assignBtnStyle = 'width:100%;padding:13px;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;' + (assignValid ? 'background:#7C5CFC;color:#fff' : 'background:#E5E1F0;color:#A99FD6');
+        action =
+          '<div style="font-size:12.5px;font-weight:700;color:#3A3648;margin-bottom:8px">작업자 배정</div>' +
+          '<select data-field="assignWorker" style="width:100%;appearance:none;background:#FBFAFD;border:1.5px solid #E2DEEE;border-radius:11px;padding:11px 14px;font-size:13.5px;font-weight:600;cursor:pointer;margin-bottom:10px">' + workerOpts + '</select>' +
+          '<div style="font-size:12.5px;font-weight:700;color:#3A3648;margin-bottom:8px">완료 기한</div>' +
+          '<input type="date" data-field="assignDue" value="' + esc(state.assign.due) + '" style="width:100%;border:1.5px solid #E2DEEE;border-radius:11px;padding:11px 14px;font-size:13.5px;font-weight:600;margin-bottom:14px" />' +
+          '<button data-act="assignSubmit" style="' + assignBtnStyle + '">배정하기</button>';
+      } else if (selRaw.status === 'assigned' || selRaw.status === 'progress') {
+        action =
+          '<div style="display:flex;align-items:center;gap:11px;padding:12px 14px;background:#F3F0FF;border-radius:12px"><div style="width:36px;height:36px;border-radius:10px;background:#7C5CFC;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;color:#fff">' + esc(initial(selRaw.assignee)) + '</div><div><div style="font-size:14px;font-weight:800">' + esc(v.assigneeLabel) + '</div><div style="font-size:12px;color:#7C5CFC;font-weight:700">' + v.sLabel + ' · 기한 ' + esc(v.due) + '</div></div></div>';
+      } else if (selRaw.status === 'review') {
+        action = '<div style="font-size:13px;color:#6E6A7C;font-weight:600;line-height:1.5;margin-bottom:14px">완료 보고됨. 승인자의 검토·승인이 필요합니다.</div>' +
+          '<button data-act="goApprove" style="width:100%;padding:13px;background:#D97706;color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer">승인 화면으로</button>';
+      } else if (selRaw.status === 'done') {
+        action = '<div style="display:flex;align-items:center;gap:10px;padding:14px;background:#F0FDF4;border-radius:12px;color:#16A34A"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12.5l4.5 4.5L19 6.5"></path></svg><span style="font-size:14.5px;font-weight:800">완료·종결 처리됨</span></div>';
+      }
+
+      // timeline
+      var hl = selRaw.history.length;
+      var timeline = selRaw.history.map(function (h, idx) {
+        return {
+          act: h.act, who: h.who, t: h.t,
+          textColor: h.warn ? '#DC2626' : '#1A1726',
+          dotStyle: 'width:11px;height:11px;border-radius:9px;flex:none;margin-top:3px;background:' + (h.warn ? '#DC2626' : '#7C5CFC') + ';box-shadow:0 0 0 3px ' + (h.warn ? '#FEECEC' : '#F3F0FF'),
+          lineStyle: idx === hl - 1 ? 'width:0' : 'width:2px;flex:1;background:#ECEAF3;margin:3px 0',
+        };
+      }).reverse();
+      var timelineHtml = timeline.map(function (t) {
+        return '<div style="display:flex;gap:12px">' +
+          '<div style="display:flex;flex-direction:column;align-items:center;flex:none"><span style="' + t.dotStyle + '"></span><span style="' + t.lineStyle + '"></span></div>' +
+          '<div style="padding-bottom:16px;min-width:0">' +
+            '<div style="font-size:13.5px;font-weight:700;color:' + t.textColor + ';line-height:1.4">' + esc(t.act) + '</div>' +
+            '<div style="font-size:11.5px;color:#B5B0C2;font-weight:600;margin-top:3px">' + esc(t.who) + ' · ' + esc(t.t) + '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      inner =
+      '<div style="display:grid;grid-template-columns:1fr 360px;gap:26px;align-items:start">' +
+        '<div>' +
+          '<div style="display:flex;align-items:center;gap:10px;margin-bottom:11px">' +
+            '<span style="font-family:ui-monospace,monospace;font-size:13px;color:#7C5CFC;font-weight:700;background:#F3F0FF;padding:4px 11px;border-radius:8px">' + esc(v.code) + '</span>' +
+            '<span style="' + v.badgeStyle + '"><span style="' + v.dotStyle + '"></span>' + v.sLabel + '</span>' +
+            (v.delayed ? '<span style="font-size:11px;font-weight:800;color:#DC2626;background:#FEECEC;padding:3px 9px;border-radius:7px">지연</span>' : '') +
+          '</div>' +
+          '<h1 style="margin:0 0 22px;font-size:25px;font-weight:800;line-height:1.35;letter-spacing:-.5px">' + esc(v.title) + '</h1>' +
+          '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#ECEAF3;border:1px solid #ECEAF3;border-radius:14px;overflow:hidden;margin-bottom:24px">' +
+            '<div style="background:#fff;padding:14px 16px"><div style="font-size:11.5px;color:#9A95A8;font-weight:700;margin-bottom:5px">호선 · 구역</div><div style="font-size:14px;font-weight:700">' + esc(v.ship) + ' · ' + esc(v.zone) + '</div></div>' +
+            '<div style="background:#fff;padding:14px 16px"><div style="font-size:11.5px;color:#9A95A8;font-weight:700;margin-bottom:5px">출처 · 발생일</div><div style="font-size:14px;font-weight:700">' + esc(v.source) + ' · ' + esc(v.created) + '</div></div>' +
+            '<div style="background:#fff;padding:14px 16px"><div style="font-size:11.5px;color:#9A95A8;font-weight:700;margin-bottom:5px">우선순위 · 기한</div><div style="font-size:14px;font-weight:700"><span style="' + v.prioStyle + '">' + esc(v.priority) + '</span> · ' + esc(v.due) + '</div></div>' +
+          '</div>' +
+          '<div style="font-size:14px;font-weight:800;margin-bottom:12px">첨부 자료</div>' +
+          '<div style="display:flex;gap:12px;margin-bottom:26px;flex-wrap:wrap">' + photoList + '</div>' +
+          '<div style="font-size:14px;font-weight:800;margin-bottom:12px">코멘트</div>' +
+          '<div style="display:flex;flex-direction:column;gap:12px;margin-bottom:14px">' + comments + '</div>' +
+          '<div style="display:flex;gap:10px">' +
+            '<input data-field="commentDraft" value="' + esc(state.commentDraft) + '" placeholder="코멘트 입력..." class="foc" style="flex:1;border:1.5px solid #E2DEEE;border-radius:12px;padding:11px 14px;font-size:13.5px;outline:none" />' +
+            '<button data-act="addComment" style="flex:none;padding:0 22px;background:#7C5CFC;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer">등록</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;flex-direction:column;gap:18px">' +
+          '<div style="background:#fff;border:1px solid #ECEAF3;border-radius:16px;padding:20px">' +
+            '<div style="font-size:13px;font-weight:800;color:#9A95A8;letter-spacing:.2px;margin-bottom:14px">진행 관리</div>' + action +
+          '</div>' +
+          '<div style="background:#fff;border:1px solid #ECEAF3;border-radius:16px;padding:20px">' +
+            '<div style="font-size:13px;font-weight:800;color:#9A95A8;letter-spacing:.2px;margin-bottom:16px">상태 변경 이력</div>' +
+            '<div style="display:flex;flex-direction:column">' + timelineHtml + '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    return '' +
+    '<div data-screen-label="지적상세" style="height:100%;overflow-y:auto;padding:24px 36px 60px">' +
+      '<button data-act="back" class="btn-back" style="display:flex;align-items:center;gap:7px;background:none;border:none;color:#6E6A7C;font-size:13.5px;font-weight:700;cursor:pointer;padding:6px 0;margin-bottom:14px">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="15 18 9 12 15 6"></polyline></svg>대시보드로</button>' +
+      inner +
+    '</div>';
+  }
+
+  // ───────────────────────────── compose ─────────────────────────────
+  function loaderHtml(msg, isError){
+    return '<div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px">' +
+      (isError ? '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#DC2626" stroke-width="2"><path d="M12 9v4"></path><path d="M12 17h.01"></path><circle cx="12" cy="12" r="9"></circle></svg>'
+               : '<div class="spin" style="width:34px;height:34px;border-radius:50%;border:3px solid #ECEAF3;border-top-color:#7C5CFC"></div>') +
+      '<div style="font-size:14px;font-weight:700;color:' + (isError ? '#DC2626' : '#9A95A8') + '">' + esc(msg) + '</div>' +
+    '</div>';
+  }
+  function mainContent(){
+    if (state.loadError) return loaderHtml('데이터 연결 오류 — ' + state.loadError, true);
+    if (state.loading) return loaderHtml('데이터 불러오는 중…', false);
+    switch (state.screen) {
+      case 'dashboard': return screenDashboard();
+      case 'detail': return screenDetail();
+      case 'worker': return screenWorker();
+      case 'approve': return screenApprove();
+      case 'register': return screenRegister();
+      default: return screenDashboard();
+    }
+  }
+  function toastHtml(){
+    if (!state.toast) return '';
+    return '<div style="position:absolute;bottom:28px;left:50%;transform:translateX(-50%);background:#1A1726;color:#fff;font-size:14px;font-weight:700;padding:13px 24px;border-radius:999px;box-shadow:0 12px 30px rgba(20,16,40,.3);animation:om-toast .3s ease;display:flex;align-items:center;gap:9px;z-index:50">' +
+      '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#7CF5B0" stroke-width="2.6"><path d="M5 12.5l4.5 4.5L19 6.5"></path></svg>' + esc(state.toast) +
+    '</div>';
+  }
+  function renderApp(){
+    return '<div style="display:flex;height:100vh;width:100vw;overflow:hidden">' +
+      sidebar() +
+      '<main style="flex:1;min-width:0;overflow:hidden;position:relative;display:flex;flex-direction:column">' +
+        mainContent() +
+        toastHtml() +
+      '</main>' +
+    '</div>';
+  }
+
+  var app = document.getElementById('app');
+  var rendering = false, queued = false;
+  function renderOnce(){
+    var active = document.activeElement;
+    var fieldKey = active && active.getAttribute ? active.getAttribute('data-field') : null;
+    var selStart = null, selEnd = null;
+    if (fieldKey && active && 'selectionStart' in active) {
+      try { selStart = active.selectionStart; selEnd = active.selectionEnd; } catch (e) {}
+    }
+    app.innerHTML = renderApp();
+    if (fieldKey) {
+      var el = app.querySelector('[data-field="' + (window.CSS && CSS.escape ? CSS.escape(fieldKey) : fieldKey) + '"]');
+      if (el) {
+        el.focus();
+        if (selStart != null && 'setSelectionRange' in el) {
+          try { el.setSelectionRange(selStart, selEnd); } catch (e) {}
+        }
+      }
+    }
+  }
+  // Reassigning innerHTML blurs the focused field, which can fire a change
+  // event that re-enters render() mid-swap. Guard against reentrancy and
+  // coalesce into a single follow-up render so no state update is lost.
+  function render(){
+    if (rendering) { queued = true; return; }
+    rendering = true;
+    try {
+      renderOnce();
+      while (queued) { queued = false; renderOnce(); }
+    } finally {
+      rendering = false;
+    }
+  }
+
+  // ───────────────────────────── events ─────────────────────────────
+  app.addEventListener('click', async function (e) {
+    var target = e.target.closest('[data-act]');
+    if (!target) return;
+    var act = target.getAttribute('data-act');
+    var id = target.getAttribute('data-id');
+    switch (act) {
+      case 'go': go(target.getAttribute('data-screen')); break;
+      case 'open': state.screen = 'detail'; state.selectedId = id; render(); break;
+      case 'statusFilter': state.filters = Object.assign({}, state.filters, { status: target.getAttribute('data-status') }); render(); break;
+      case 'start':
+        try {
+          await patch(id, { status:'progress' }, { t:now(), who:state.workerName, act:'작업 착수' });
+          showToast('착수 처리됨 — 진행중');
+        } catch (e2) { showToast('저장 실패 — 다시 시도하세요'); }
+        break;
+      case 'report': state.report = { open:true, id:id, memo:'', photo:false }; render(); break;
+      case 'togglePhoto': state.report = Object.assign({}, state.report, { photo: !state.report.photo }); render(); break;
+      case 'closeSheet': state.report = Object.assign({}, state.report, { open:false }); render(); break;
+      case 'submitReport': submitReport(); break;
+      case 'selectApprove': state.approveId = id; render(); break;
+      case 'approve': approveItem(state.approveId); break;
+      case 'openReject': state.reject = { open:true, id:state.approveId, reason:'', err:false }; render(); break;
+      case 'closeReject': state.reject = Object.assign({}, state.reject, { open:false }); render(); break;
+      case 'submitReject': submitReject(); break;
+      case 'regSource': state.reg = Object.assign({}, state.reg, { source: target.getAttribute('data-source') }); render(); break;
+      case 'regPrio': state.reg = Object.assign({}, state.reg, { priority: target.getAttribute('data-prio') }); render(); break;
+      case 'toggleAttach': state.reg = Object.assign({}, state.reg, { attach: !state.reg.attach }); render(); break;
+      case 'submitRegister': {
+        var r = state.reg;
+        var valid = r.content.trim() && r.ship && r.zone.trim() && r.date && r.source;
+        submitRegister(valid);
+        break;
+      }
+      case 'back': go('dashboard'); break;
+      case 'confirm':
+        try {
+          await patch(state.selectedId, { status:'confirmed' }, { t:now(), who:'강민재', act:'내용 확인 완료' });
+          showToast('확인 처리됨');
+        } catch (e2) { showToast('저장 실패 — 다시 시도하세요'); }
+        break;
+      case 'assignSubmit': assignSubmit(state.assign.worker && state.assign.due); break;
+      case 'goApprove': go('approve'); break;
+      case 'addComment': addComment(); break;
+      case 'stop': break;
+    }
+  });
+
+  function onField(e){
+    var el = e.target;
+    var field = el.getAttribute && el.getAttribute('data-field');
+    if (!field) return;
+    var val = el.value;
+    switch (field) {
+      case 'filterAssignee': state.filters = Object.assign({}, state.filters, { assignee: val }); render(); break;
+      case 'filterShip': state.filters = Object.assign({}, state.filters, { ship: val }); render(); break;
+      case 'filterZone': state.filters = Object.assign({}, state.filters, { zone: val }); render(); break;
+      case 'reportMemo': state.report = Object.assign({}, state.report, { memo: val }); render(); break;
+      case 'rejectReason': state.reject = Object.assign({}, state.reject, { reason: val, err: false }); render(); break;
+      case 'regContent': state.reg = Object.assign({}, state.reg, { content: val }); render(); break;
+      case 'regShip': state.reg = Object.assign({}, state.reg, { ship: val }); render(); break;
+      case 'regZone': state.reg = Object.assign({}, state.reg, { zone: val }); render(); break;
+      case 'regDate': state.reg = Object.assign({}, state.reg, { date: val }); render(); break;
+      case 'assignWorker': state.assign = Object.assign({}, state.assign, { worker: val }); render(); break;
+      case 'assignDue': state.assign = Object.assign({}, state.assign, { due: val }); render(); break;
+      case 'commentDraft': state.commentDraft = val; render(); break;
+    }
+  }
+  app.addEventListener('input', onField);
+  app.addEventListener('change', onField);
+
+  // ───────────────────────────── boot ─────────────────────────────
+  render(); // initial paint (loading spinner) before first snapshot
+
+  // Live subscription: Firestore is the single source of truth. Every write
+  // (register/confirm/assign/start/report/approve/reject/comment) round-trips
+  // through here, so all screens — and other devices — stay in sync.
+  onSnapshot(
+    query(itemsCol, orderBy('seq', 'desc')),
+    function (snap) {
+      var items = [];
+      snap.forEach(function (d) { items.push(normalize(d.id, d.data())); });
+      state.items = items;
+      state.loading = false;
+      state.loadError = '';
+      render();
+    },
+    function (err) {
+      state.loading = false;
+      state.loadError = (err && err.message) ? err.message : String(err);
+      render();
+    }
+  );
+</script>
+</body>
+</html>
