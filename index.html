@@ -906,6 +906,10 @@ const itemsCol = collection(db, 'items');
 
   var app = document.getElementById('app');
   var rendering = false, queued = false;
+  // While an IME composition is active (e.g. Korean Hangul assembly), replacing
+  // the focused input's DOM node would abort composition and split syllables
+  // into separate jamo. Defer any re-render until compositionend.
+  var composing = false, pendingRender = false;
   function renderOnce(){
     var active = document.activeElement;
     var fieldKey = active && active.getAttribute ? active.getAttribute('data-field') : null;
@@ -928,6 +932,7 @@ const itemsCol = collection(db, 'items');
   // event that re-enters render() mid-swap. Guard against reentrancy and
   // coalesce into a single follow-up render so no state update is lost.
   function render(){
+    if (composing) { pendingRender = true; return; }
     if (rendering) { queued = true; return; }
     rendering = true;
     try {
@@ -1008,6 +1013,13 @@ const itemsCol = collection(db, 'items');
   }
   app.addEventListener('input', onField);
   app.addEventListener('change', onField);
+  // IME composition guard: keep the DOM stable during Hangul assembly, then
+  // flush any render that was deferred while composing.
+  app.addEventListener('compositionstart', function () { composing = true; });
+  app.addEventListener('compositionend', function () {
+    composing = false;
+    if (pendingRender) { pendingRender = false; render(); }
+  });
 
   // ───────────────────────────── boot ─────────────────────────────
   render(); // initial paint (loading spinner) before first snapshot
