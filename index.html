@@ -52,6 +52,12 @@ const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 const itemsCol = collection(db, 'items');
 
+// ───────────────────────────── gemini (AI 비서) ─────────────────────────────
+const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+// Key resolution prefers localStorage('GEMINI_API_KEY') so the public repo can
+// stay key-free; this default is a convenience fallback for local use.
+const GEMINI_API_KEY_DEFAULT = '';
+
   // ───────────────────────────── status meta ─────────────────────────────
   var META = {
     registered:{ label:'등록됨', fg:'#6B7280', bg:'#F3F4F6' },
@@ -77,6 +83,91 @@ const itemsCol = collection(db, 'items');
   function initial(name){ return name ? name.slice(-2) : '?'; }
   function today(){ return '2026.06.30 (화)'; }
   function now(){ return '06.30 ' + new Date().toTimeString().slice(0,5); }
+
+  // ───────────────────────────── AI 비서 (Gemini) ─────────────────────────────
+  function getApiKey(){
+    try { var k = localStorage.getItem('GEMINI_API_KEY'); if (k) return k; } catch (e) {}
+    return GEMINI_API_KEY_DEFAULT || '';
+  }
+  // A compact signature of the current status counts; the summary regenerates
+  // only when this changes (or on manual refresh), to conserve free quota.
+  function aiSignature(){
+    var c = {}; ORDER.forEach(function (k) { c[k] = 0; });
+    var delayed = 0;
+    state.items.forEach(function (i) {
+      if (c[i.status] != null) c[i.status]++;
+      if (i.delayed && i.status !== 'done') delayed++;
+    });
+    return state.items.length + '|' + ORDER.map(function (k) { return c[k]; }).join(',') + '|' + delayed;
+  }
+  function buildAiPrompt(){
+    var items = state.items;
+    var bs = {}; ORDER.forEach(function (k) { bs[k] = 0; });
+    items.forEach(function (i) { if (bs[i.status] != null) bs[i.status]++; });
+    var done = bs.done;
+    var openN = items.length - done;
+    var delayedList = items.filter(function (i) { return i.delayed && i.status !== 'done'; });
+    var byAssignee = {};
+    items.forEach(function (i) {
+      if (i.status === 'done' || !i.assignee) return;
+      byAssignee[i.assignee] = (byAssignee[i.assignee] || 0) + 1;
+    });
+    var assigneeStr = Object.keys(byAssignee).map(function (a) { return a + ' ' + byAssignee[a] + '건'; }).join(', ') || '없음';
+    var delayStr = delayedList.map(function (i) { return i.code + '(' + i.ship + ' ' + i.zone + (i.assignee ? '·' + i.assignee : '') + ')'; }).join(', ') || '없음';
+    var lines = [
+      '오늘 날짜: ' + today(),
+      '전체 ' + items.length + '건, 미완료 ' + openN + '건, 완료 ' + done + '건',
+      '상태별: 등록됨 ' + bs.registered + ', 확인됨 ' + bs.confirmed + ', 배정됨 ' + bs.assigned + ', 진행중 ' + bs.progress + ', 검토대기 ' + bs.review,
+      '지연 ' + delayedList.length + '건' + (delayedList.length ? ' — ' + delayStr : ''),
+      '담당자별 미완료: ' + assigneeStr,
+    ];
+    return '당신은 조선소 선주 지적(품질 지적) 관리 시스템의 비서입니다. 아래 현황을 현장 담당자에게 보고하듯 한국어 한 문장으로 요약하세요. 규칙: 30~70자 한 문장, 지연·검토대기·미완료처럼 가장 중요한 정보를 우선, 핵심 숫자 포함, 이모지·마크다운·인사말 금지, 한 문장만 출력.\n\n[현황]\n' + lines.join('\n');
+  }
+  async function callGemini(prompt){
+    var key = getApiKey();
+    if (!key) { var nk = new Error('NO_KEY'); nk.status = 401; throw nk; }
+    var res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.4, maxOutputTokens: 256 } }),
+    });
+    if (!res.ok) {
+      var msg = '';
+      try { var j = await res.json(); msg = (j && j.error && j.error.message) || ''; } catch (e) {}
+      var err = new Error(msg || ('HTTP ' + res.status)); err.status = res.status; throw err;
+    }
+    var data = await res.json();
+    var cand = data && data.candidates && data.candidates[0];
+    var parts = cand && cand.content && cand.content.parts;
+    var text = parts ? parts.map(function (p) { return p.text || ''; }).join('') : '';
+    if (!text.trim()) throw new Error('빈 응답');
+    return text.trim().replace(/\s+/g, ' ');
+  }
+  function aiErrorMsg(e){
+    var m = (e && e.message) || '';
+    if (e && (e.status === 429 || /RESOURCE_EXHAUSTED|quota/i.test(m))) return '무료 사용량 한도를 초과했어요. 잠시 후 다시 시도해 주세요.';
+    if (e && (e.status === 400 || e.status === 403 || e.status === 401) || /API key|API_KEY|permission|invalid/i.test(m)) return 'API 키가 유효하지 않은 것 같아요. 키를 다시 확인해 주세요.';
+    return '요약을 불러오지 못했어요. 다시 시도해 주세요.';
+  }
+  async function generateSummary(sig){
+    state.ai = Object.assign({}, state.ai, { loading:true, error:'', sig:sig });
+    render();
+    try {
+      var text = await callGemini(buildAiPrompt());
+      state.ai = { loading:false, text:text, error:'', sig:sig };
+    } catch (e) {
+      state.ai = { loading:false, text:'', error:aiErrorMsg(e), sig:sig };
+    }
+    render();
+  }
+  // Auto-generate when on the dashboard and the status counts have changed.
+  function ensureSummary(){
+    if (state.loading || state.screen !== 'dashboard') return;
+    if (!getApiKey() || state.ai.loading) return;
+    var sig = aiSignature();
+    if (state.ai.sig === sig && (state.ai.text || state.ai.error)) return;
+    generateSummary(sig);
+  }
 
   // ───────────────────────── firestore <-> view model ─────────────────────────
   // Normalize a Firestore document into the shape the UI expects.
@@ -128,6 +219,8 @@ const itemsCol = collection(db, 'items');
     assign: { worker:'', due:'' },
     commentDraft: '',
     toast: '',
+    ai: { loading:false, text:'', error:'', sig:null },
+    aiKeyDraft: '',
   };
   var toastTimer = null;
 
@@ -305,6 +398,48 @@ const itemsCol = collection(db, 'items');
     return '<select data-field="' + field + '" style="' + SELECT_STYLE + '">' + opts + '</select>';
   }
 
+  function aiCard(){
+    var ai = state.ai;
+    var hasKey = !!getApiKey();
+    var sparkle = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"></path></svg>';
+    var refreshBtn = '<button data-act="aiRefresh" title="다시 요약" style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.16);color:#fff;border:none;border-radius:999px;padding:7px 13px;font-size:12px;font-weight:700;cursor:pointer">' +
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 4v5h-5"></path></svg>다시 요약</button>';
+    var header =
+      '<div style="display:flex;align-items:center;gap:10px">' +
+        '<div style="width:30px;height:30px;border-radius:9px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center">' + sparkle + '</div>' +
+        '<div style="font-size:12.5px;font-weight:800;color:#fff;letter-spacing:.3px">AI 비서 · 현황 한 줄 요약</div>' +
+        '<div style="flex:1"></div>' +
+        (hasKey && !ai.loading ? refreshBtn : '') +
+      '</div>';
+    var body;
+    if (!hasKey) {
+      body =
+        '<div style="color:#fff;font-size:13px;font-weight:600;opacity:.95;margin-bottom:10px">Gemini API 키를 입력하면 현재 지적 현황을 한 줄로 요약해 드려요. (키는 이 브라우저에만 저장됩니다)</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<input data-field="aiKeyInput" value="' + esc(state.aiKeyDraft) + '" placeholder="Gemini API 키 붙여넣기" style="flex:1;border:none;border-radius:10px;padding:11px 13px;font-size:13px;color:#1A1726;outline:none" />' +
+          '<button data-act="aiSaveKey" style="flex:none;background:#fff;color:#7C5CFC;border:none;border-radius:10px;padding:0 18px;font-size:13.5px;font-weight:800;cursor:pointer">저장</button>' +
+        '</div>';
+    } else if (ai.loading) {
+      body = '<div style="display:flex;align-items:center;gap:11px;color:#fff"><div class="spin" style="width:18px;height:18px;border-radius:50%;border:2.5px solid rgba(255,255,255,.35);border-top-color:#fff"></div><span style="font-size:14px;font-weight:600">현황을 요약하는 중…</span></div>';
+    } else if (ai.error) {
+      body = '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">' +
+        '<span style="color:#FFE6E6;font-size:13.5px;font-weight:600">' + esc(ai.error) + '</span>' +
+        '<button data-act="aiRefresh" style="flex:none;background:rgba(255,255,255,.16);color:#fff;border:none;border-radius:999px;padding:7px 14px;font-size:12.5px;font-weight:700;cursor:pointer">다시 시도</button>' +
+      '</div>';
+    } else if (ai.text) {
+      body = '<div style="display:flex;align-items:flex-start;gap:10px">' +
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" style="margin-top:2px;flex:none;opacity:.9"><path d="M7.5 9h9M7.5 13h6"></path><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l2-2.2A8.5 8.5 0 1 1 21 11.5z"></path></svg>' +
+        '<div style="font-size:15.5px;font-weight:700;color:#fff;line-height:1.5">' + esc(ai.text) + '</div>' +
+      '</div>';
+    } else {
+      body = '<div style="color:#fff;font-size:13.5px;font-weight:600;opacity:.9">요약을 준비하고 있어요…</div>';
+    }
+    var footer = hasKey
+      ? '<div style="display:flex;align-items:center;gap:8px;margin-top:11px"><span style="font-size:10.5px;color:rgba(255,255,255,.72);font-weight:600">Gemini 2.5 Flash-Lite · 무료</span><span style="color:rgba(255,255,255,.4)">·</span><button data-act="aiResetKey" style="background:none;border:none;color:rgba(255,255,255,.82);font-size:10.5px;font-weight:700;cursor:pointer;padding:0;text-decoration:underline">API 키 재설정</button></div>'
+      : '';
+    return '<div style="background:linear-gradient(135deg,#7C5CFC,#9A7CFF);border-radius:16px;padding:17px 20px;margin-bottom:18px;box-shadow:0 8px 22px rgba(124,92,252,.26)">' + header + '<div style="margin-top:12px">' + body + '</div>' + footer + '</div>';
+  }
+
   function screenDashboard(){
     var items = state.items;
     var totalCount = items.length;
@@ -432,6 +567,7 @@ const itemsCol = collection(db, 'items');
           '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>새 지적 등록' +
         '</button>' +
       '</div>' +
+      aiCard() +
       '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:18px">' + cards + '</div>' +
       '<div style="background:#fff;border:1px solid #ECEAF3;border-radius:16px;padding:18px 20px;margin-bottom:18px">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
@@ -941,6 +1077,7 @@ const itemsCol = collection(db, 'items');
     } finally {
       rendering = false;
     }
+    ensureSummary();
   }
 
   // ───────────────────────────── events ─────────────────────────────
@@ -953,6 +1090,21 @@ const itemsCol = collection(db, 'items');
       case 'go': go(target.getAttribute('data-screen')); break;
       case 'open': state.screen = 'detail'; state.selectedId = id; render(); break;
       case 'statusFilter': state.filters = Object.assign({}, state.filters, { status: target.getAttribute('data-status') }); render(); break;
+      case 'aiRefresh': generateSummary(aiSignature()); break;
+      case 'aiSaveKey': {
+        var key = (state.aiKeyDraft || '').trim();
+        if (!key) { showToast('API 키를 입력하세요'); break; }
+        try { localStorage.setItem('GEMINI_API_KEY', key); } catch (e2) {}
+        state.aiKeyDraft = '';
+        state.ai = { loading:false, text:'', error:'', sig:null };
+        render();
+        break;
+      }
+      case 'aiResetKey':
+        try { localStorage.removeItem('GEMINI_API_KEY'); } catch (e2) {}
+        state.ai = { loading:false, text:'', error:'', sig:null };
+        render();
+        break;
       case 'start':
         try {
           await patch(id, { status:'progress' }, { t:now(), who:state.workerName, act:'작업 착수' });
@@ -1009,6 +1161,7 @@ const itemsCol = collection(db, 'items');
       case 'assignWorker': state.assign = Object.assign({}, state.assign, { worker: val }); render(); break;
       case 'assignDue': state.assign = Object.assign({}, state.assign, { due: val }); render(); break;
       case 'commentDraft': state.commentDraft = val; render(); break;
+      case 'aiKeyInput': state.aiKeyDraft = val; break;
     }
   }
   app.addEventListener('input', onField);
